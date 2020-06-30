@@ -1,10 +1,8 @@
-import shutil
 from imutils import paths
 import os
 import pandas as pd
 import numpy as np
 import torch
-from torchvision import transforms
 from PIL import Image
 import warnings
 from collections import namedtuple
@@ -12,20 +10,30 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.jit.annotations import Optional, Tuple
 from torch import Tensor
+import torch
+import torchvision
+from torchvision import datasets, models, transforms
+import copy
 
 workingDirectory = os.path.split(os.path.dirname(os.path.realpath(__file__)))[0]
-covidPath = os.path.sep.join([f'{workingDirectory}', 'COVID-19 Radiography Database', 'COVID-19'])
-normalPath = os.path.sep.join([f'{workingDirectory}', 'COVID-19 Radiography Database', 'NORMAL'])
-verificationPath = os.path.sep.join([f'{workingDirectory}', 'COVID-19 Radiography Database', 'VERIFICATION'])
-normalImages = list(paths.list_images(f'{normalPath}'))
-covidImages = list(paths.list_images(f'{covidPath}'))
+modelName = 'googlenet'
+numClasses = 2
+batchSize = 128
+epochs = 75
+feature_extract = True
 
-def processImages(normalImages = normalImages, covidImages = covidImages): #converts image directories to resized greyscale numpy arrays
+
+def processImages(workingDirectory):
     verImg = []
     verLabels = []
     images = []
     labels = []
-    preprocess = transforms.Compose([transforms.Resize(224), transforms.CenterCrop(224), transforms.ToTensor(),transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+    covidPath = os.path.sep.join([f'{workingDirectory}', 'COVID-19 Radiography Database', 'COVID-19'])
+    normalPath = os.path.sep.join([f'{workingDirectory}', 'COVID-19 Radiography Database', 'NORMAL'])
+    verificationPath = os.path.sep.join([f'{workingDirectory}', 'COVID-19 Radiography Database', 'VERIFICATION'])
+    normalImages = list(paths.list_images(f'{normalPath}'))
+    covidImages = list(paths.list_images(f'{covidPath}'))
+    preprocess = transforms.Compose([transforms.Resize(224), transforms.CenterCrop(224), transforms.ToTensor(), transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
     for i in covidImages:
         label = i.split(os.path.sep)[-2]
         image = Image.open(i).convert('RGB')
@@ -53,31 +61,50 @@ def processImages(normalImages = normalImages, covidImages = covidImages): #conv
     labels = [0 if x=='NORMAL' else x for x in labels]
     verLabels = [1 if x=='COVID-19' else x for x in verLabels]
     verLabels = [0 if x=='normal' else x for x in verLabels]
-    return images, labels, verImg, verLabels
-
-
+    return images, labels, verImg, verLabelss
 
 __all__ = ['GoogLeNet', 'googlenet', "GoogLeNetOutputs", "_GoogLeNetOutputs"]
 
-model_urls = {'googlenet': 'https://download.pytorch.org/models/googlenet-1378be20.pth',}
+model_urls = {
+    # GoogLeNet ported from TensorFlow
+    'googlenet': 'https://download.pytorch.org/models/googlenet-1378be20.pth',
+}
 
 GoogLeNetOutputs = namedtuple('GoogLeNetOutputs', ['logits', 'aux_logits2', 'aux_logits1'])
-GoogLeNetOutputs.__annotations__ = {'logits': Tensor, 'aux_logits2': Optional[Tensor], 'aux_logits1': Optional[Tensor]}
+GoogLeNetOutputs.__annotations__ = {'logits': Tensor, 'aux_logits2': Optional[Tensor],
+                                    'aux_logits1': Optional[Tensor]}
 
 _GoogLeNetOutputs = GoogLeNetOutputs
 
+
 def googlenet(pretrained=False, progress=True, **kwargs):
+    if pretrained:
+        if 'transform_input' not in kwargs:
+            kwargs['transform_input'] = True
+        if 'aux_logits' not in kwargs:
+            kwargs['aux_logits'] = False
+        original_aux_logits = kwargs['aux_logits']
+        kwargs['aux_logits'] = True
+        kwargs['init_weights'] = False
+        model = GoogLeNet(**kwargs)
+        state_dict = load_state_dict_from_url(model_urls['googlenet'], progress=progress)
+        model.load_state_dict(state_dict)
+        if not original_aux_logits:
+            model.aux_logits = False
+            model.aux1 = None
+            model.aux2 = None
+        return model
+
     return GoogLeNet(**kwargs)
+
 
 class GoogLeNet(nn.Module):
     __constants__ = ['aux_logits', 'transform_input']
 
-    def __init__(self, num_classes=2, aux_logits=True, transform_input=False, init_weights=None,
-                blocks=None):
+    def __init__(self, num_classes=1000, aux_logits=True, transform_input=False, init_weights=None, blocks=None):
         super(GoogLeNet, self).__init__()
         if blocks is None:
             blocks = [BasicConv2d, Inception, InceptionAux]
-        if init_weights is None:
             init_weights = True
         assert len(blocks) == 3
         conv_block = blocks[0]
@@ -136,9 +163,9 @@ class GoogLeNet(nn.Module):
 
     def _transform_input(self, x):
         if self.transform_input:
-            x_ch0 = torch.unsqueeze(x[0], 1) * (0.229 / 0.5) + (0.485 - 0.5) / 0.5
-            x_ch1 = torch.unsqueeze(x[1], 1) * (0.224 / 0.5) + (0.456 - 0.5) / 0.5
-            x_ch2 = torch.unsqueeze(x[2], 1) * (0.225 / 0.5) + (0.406 - 0.5) / 0.5
+            x_ch0 = torch.unsqueeze(x[:, 0], 1) * (0.229 / 0.5) + (0.485 - 0.5) / 0.5
+            x_ch1 = torch.unsqueeze(x[:, 1], 1) * (0.224 / 0.5) + (0.456 - 0.5) / 0.5
+            x_ch2 = torch.unsqueeze(x[:, 2], 1) * (0.225 / 0.5) + (0.406 - 0.5) / 0.5
             x = torch.cat((x_ch0, x_ch1, x_ch2), 1)
         return x
 
@@ -196,23 +223,19 @@ class GoogLeNet(nn.Module):
             return self.eager_outputs(x, aux2, aux1)
 
 class Inception(nn.Module):
-    def __init__(self, in_channels, ch1x1, ch3x3red, ch3x3, ch5x5red, ch5x5, pool_proj,
-                conv_block=None):
+    def __init__(self, in_channels, ch1x1, ch3x3red, ch3x3, ch5x5red, ch5x5, pool_proj, conv_block=None):
         super(Inception, self).__init__()
         if conv_block is None:
             conv_block = BasicConv2d
         self.branch1 = conv_block(in_channels, ch1x1, kernel_size=1)
-
         self.branch2 = nn.Sequential(
             conv_block(in_channels, ch3x3red, kernel_size=1),
             conv_block(ch3x3red, ch3x3, kernel_size=3, padding=1)
         )
-
         self.branch3 = nn.Sequential(
             conv_block(in_channels, ch5x5red, kernel_size=1),
             conv_block(ch5x5red, ch5x5, kernel_size=3, padding=1)
         )
-
         self.branch4 = nn.Sequential(
             nn.MaxPool2d(kernel_size=3, stride=1, padding=1, ceil_mode=True),
             conv_block(in_channels, pool_proj, kernel_size=1)
@@ -230,7 +253,6 @@ class Inception(nn.Module):
         outputs = self._forward(x)
         return torch.cat(outputs, 1)
 
-
 class InceptionAux(nn.Module):
     def __init__(self, in_channels, num_classes, conv_block=None):
         super(InceptionAux, self).__init__()
@@ -239,6 +261,7 @@ class InceptionAux(nn.Module):
         self.conv = conv_block(in_channels, 128, kernel_size=1)
         self.fc1 = nn.Linear(2048, 1024)
         self.fc2 = nn.Linear(1024, num_classes)
+
     def forward(self, x):
         x = F.adaptive_avg_pool2d(x, (4, 4))
         x = self.conv(x)
@@ -258,32 +281,93 @@ class BasicConv2d(nn.Module):
         x = self.bn(x)
         return F.relu(x, inplace=True)
 
-processImages()
+def train_model(model, dataloaders, criterion, optimizer, epochs=25, is_inception=False):
+    val_acc_history = []
+    best_model_wts = copy.deepcopy(model.state_dict())
+    best_acc = 0.0
+    for epoch in range(epochs):
+        printEpoch = 'Epoch [{}/{}]'.format(epoch, epochs - 1)
+        for phase in ['train', 'val']:
+            if phase == 'train':
+                model.train()  
+            else:
+                model.eval()
+            running_loss = 0.0
+            running_corrects = 0
+            for inputs, labels in dataloaders[phase]:
+                inputs = inputs.to(device)
+                labels = labels.to(device)
+                optimizer.zero_grad()
+                with torch.set_grad_enabled(phase == 'train'):
+                    if is_inception and phase == 'train':
+                        outputs, aux_outputs = model(inputs)
+                        loss1 = criterion(outputs, labels)
+                        loss2 = criterion(aux_outputs, labels)
+                        loss = loss1 + 0.4*loss2
+                    else:
+                        outputs = model(inputs)
+                        loss = criterion(outputs, labels)
 
-model = googlenet()
+                    _, preds = torch.max(outputs, 1)
 
-images, verImg = torch.from_numpy(np.asarray(images)), torch.from_numpy(np.asarray(verImg))
+                    if phase == 'train':
+                        loss.backward()
+                        optimizer.step()
+
+                running_loss += loss.item() * inputs.size(0)
+                running_corrects += torch.sum(preds == labels.data)
+
+            epoch_loss = running_loss / len(dataloaders[phase].dataset)
+            epoch_acc = running_corrects.double() / len(dataloaders[phase].dataset)
+            print(printEpoch + ', {} Loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss, epoch_acc))
+            if phase == 'val' and epoch_acc > best_acc:
+                best_acc = epoch_acc
+                best_model_wts = copy.deepcopy(model.state_dict())
+            if phase == 'val':
+                val_acc_history.append(epoch_acc)
+
+    model.load_state_dict(best_model_wts)
+    return model, val_acc_history
+
+def set_parameter_requires_grad(model, feature_extracting):
+    if feature_extracting:
+        for param in model.parameters():
+            param.requires_grad = False
+
+def initialize_model(modelName, numClasses, feature_extract, use_pretrained=True):
+    model = None
+    input_size = 0
+
+    if modelName == "resnet":
+        model = models.resnet18(pretrained=use_pretrained)
+        set_parameter_requires_grad(model, feature_extract)
+        num_ftrs = model.fc.in_features
+        model.fc = torch.nn.Linear(num_ftrs, numClasses)
+        input_size = 224
+
+    elif modelName == "googlenet":
+        model = googlenet(pretrained=use_pretrained)
+        set_parameter_requires_grad(model, feature_extract)
+        model.numClasses = numClasses
+        num_ftrs = model.fc.in_features
+        model.fc = torch.nn.Linear(num_ftrs, numClasses)
+        input_size = 224
+    return model, input_size
+
+
+model, input_size = initialize_model(modelName, numClasses, feature_extract, use_pretrained=True)
+images, labels, verImg, verLabels = processImages(workingDirectory = workingDirectory)
+
 train = torch.utils.data.TensorDataset(images, labels)
-train = torch.utils.data.DataLoader(train, batch_size = 20)
 verification = torch.utils.data.TensorDataset(verImg, verLabels)
-verification = torch.utils.data.DataLoader(verification, batch_size = 20)
+train = torch.utils.data.DataLoader(train, batchSize = batchSize, shuffle = True, num_workers = 4)
+verification = torch.utils.data.DataLoader(verification, batchSize = 180, shuffle = True, num_workers = 4)
+dataloaders_dict = {'train': train, 'val': verification}
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-if torch.cuda.is_available():
-    train = train.to('cuda')
-    verification = verification.to('cuda')
-    model.to('cuda')
+model = model.to(device)
+params_to_update = model.parameters()
+optimizer_ft = torch.optim.SGD(params_to_update, lr=1e-4, momentum=0.9)#, nesterov = True)
+criterion = torch.nn.CrossEntropyLoss()
 
-loss = torch.nn.BCELoss()
-optimizer = torch.optim.SGD()
-
-for epoch in range(50):
-    for xb, yb in train:
-        pred = model(xb)
-        loss = loss(pred, yb)
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-    model.eval()
-    with torch.no_grad():
-        valLoss = sum(loss_func(xb, yb) for xb, yb in validation)
-    print('Epoch', epoch, valLoss / len(validation))
+model, hist = train_model(model, dataloaders_dict, criterion, optimizer_ft, epochs=epochs, is_inception=(modelName=="inception"))
