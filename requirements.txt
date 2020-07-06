@@ -2,3 +2,4 @@ torch==1.5.1
 torchvision==0.6.0a+35d732a
 numpy==1.18.5
 pandas==1.0.5
+imutils==0.5.3
